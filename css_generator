@@ -1,0 +1,374 @@
+#!/usr/bin/php
+<?php
+// TODO: Gestion d'erreur (permission, lecture, écriture).
+// TODO: Conversion d'image JPEG en PNG.
+function shortOption(){
+    $shortopts  = ""; // récupérer tous les args.
+    $shortopts .= "f:";  // Fichier| requise | a besoin d'une valeur
+    $shortopts .= "p:";  // Fichier| requise | a besoin d'une valeur
+    $shortopts .= "i:";  // Change le nom du fichier image | optionel | a besoin d'une valeur
+    $shortopts .= "s:"; // Change le nom du fichier css | optionel | a besoin d'une valeur
+    $shortopts .= "r"; // ajoute un récursivité | optionel | n'a pas besoin d'une valeur
+    $shortopts .= "h"; // man help
+    $shortopts .= "c"; // convertion de fichier image non png
+    $shortopts .= "n"; // Essaye | Dry Run
+    return $shortopts;
+}
+
+function longOption(){
+    return ['file:', 'recursive::', 'output-image:', 'output-style:','help','padding:','convert','dry-run'];
+}
+
+class CSSGenerator
+{
+    /**
+     * @var false|false[]|string[]
+     */
+    private $_arguments; // array | tableau d'argument
+
+    /**
+     * @var array
+     */
+    private $_tree; // array | arborescence de fichier.
+
+    /**
+     * @var string
+     */
+    private $_style_name; // nom du fichier css. | par défault  = 'style.css'
+
+    /**
+     * @var string
+     */
+    private $_sprite_name; // nom du fichier png. | par défault  = 'sprite.png'
+
+    /**
+     * @var array
+     */
+    private $_position; // position de chaque image.
+
+    /**
+     * @var int
+     */
+    private $_padding; // espacement des image.
+
+    /**
+     * @var int
+     */
+    private $_error; // nombre d'erreur.
+
+    /**
+     * CSSGenerator constructor.
+     */
+    public function __construct() {
+        if (!extension_loaded("gd")){
+            die("L'extension GD est requise.".PHP_EOL);
+        }
+        $this->_arguments = getopt(shortOption(), longOption());
+        foreach ($this->_arguments as $arg => $value){ // vérifie si le -h | --help à été spécifié.
+            if ($arg == "h" || $arg == "help") {
+                $this->showHelp();
+                exit();
+            }
+        }
+        $this->_style_name = "style.css";
+        $this->_sprite_name = "sprite.png";
+        $this->_tree = [];
+        $this->_position = [];
+        $this->_padding = 0;
+        $this->_error = 0;
+    }
+
+    /**
+     * show the man page
+     */
+    private function showHelp() {
+        echo <<<EOF
+NAME
+    css_generator - sprite for HTML use
+
+SYNOPSIS
+
+    css_generator [OPTIONS]
+
+DESCRIPTION
+
+   Concatenate all images inside a folder in one sprite and write a style sheet ready to use. 
+   Mandatory arguments to long options are mandatory for short options too.
+   
+   -f, --file [STRING]
+        File or directory for generate a sprite.
+   
+   -r, --recursive
+        Look for images into the assets_folder passed as arguement and all of its subdirectories.
+    
+   -i, --output-image [STRING]
+        Name of the generated image. If blank, the default name is « sprite.png ».
+   
+   -s, --output-style [STRING]
+        Name of the generated stylesheet. If blank, the default name is « style.css ».
+
+BONUS
+   
+   -p, --padding [INTEGER]
+        Add padding between images of NUMBER pixels.
+   
+   -c, --convert (experimental)
+        Convert another image to png.
+        
+   -n, --dry-run (developpement)
+        try with debuging, and delete the result
+        
+EOF;
+echo PHP_EOL;
+    }
+
+    /**
+     * @param $position
+     */
+    private function setPosition($position)
+    {
+        array_push($this->_position, $position);
+    }
+
+    /**
+     * Entry of application
+     */
+    public function make()
+    {
+        if (count($this->_arguments) > 0){
+            if ((isset($this->_arguments["f"]) && $this->_arguments["f"] != false) || (isset($this->_arguments["file"]) && $this->_arguments["file"] != false)) {
+                isset($this->_arguments['f']) ? $this->searchTree($this->_arguments["f"]) : null;
+                isset($this->_arguments['file']) ? $this->searchTree($this->_arguments["file"]) : null;
+            }
+
+            if ((isset($this->_arguments["i"]) && $this->_arguments["i"] != false) || (isset($this->_arguments["output-image"]) && $this->_arguments["output-image"] != false)) {
+                isset($this->_arguments['i']) ? $this->setSpriteName($this->_arguments['i']) : null;
+                isset($this->_arguments['output-image']) ? $this->setSpriteName($this->_arguments['output-image']) : null;
+                $this->getSprite();
+            } else {
+                $this->getSprite();
+            }
+            if (isset($this->_arguments['p']) && $this->_arguments['p'] != false){
+                $this->setPadding($this->_arguments['p']);
+            }
+            if (isset($this->_arguments['padding']) && $this->_arguments['padding'] != false){
+                $this->setPadding($this->_arguments['padding']);
+            }
+            if ((isset($this->_arguments["s"]) && $this->_arguments["s"] != false) || (isset($this->_arguments["output-style"]) && $this->_arguments["output-style"] != false)) {
+                isset($this->_arguments['s']) ? $this->setStyleName($this->_arguments['s']) : null;
+                isset($this->_arguments['output-style']) ? $this->setStyleName($this->_arguments['output-style']) : null;
+                $this->getStyle();
+            } else {
+                $this->getStyle();
+            }
+            if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+                $this->showNumberOfError();
+            }
+        } else {
+            die("L'argument '-f, --file [STRING]' est requis. \nPour afficher le manuel d'utilisation entrer l'option '-h, --help'".PHP_EOL);
+        }
+    }
+
+    /**
+     * Setter of padding
+     * @param $padding
+     */
+    private function setPadding($padding)
+    {
+        $this->_padding = $padding;
+    }
+
+    /**
+     * @param $path
+     * @return array
+     */
+    private function searchTree($path) {
+        if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+            echo "\e[92mBuilding tree...\e[0m".PHP_EOL;
+        }
+        $path = realpath($path);
+        if (is_readable($path) && is_dir($path) && $handle = opendir($path)){
+            while(false !== ($entry = readdir($handle))){
+                if ($entry != "." && $entry != ".."){
+                    if (is_readable(realpath($path.'/'.$entry)) && is_file(realpath($path.'/'.$entry))){
+                        if (isset(pathinfo(realpath($path.'/'.$entry))['extension']) && pathinfo(realpath($path.'/'.$entry))['extension'] == 'png'){
+                            $this->setTree(realpath($path.'/'.$entry));
+                        }
+                    } elseif(is_readable($path.'/'.$entry) && is_dir($path.'/'.$entry) && (isset($this->_arguments["r"]) || isset($this->_arguments["recursive"]))){
+                        $this->searchTree(realpath($path.'/'.$entry));
+                    } else {
+                        return $this->_tree;
+                    }
+                }
+            }
+        } elseif(is_readable(realpath($path)) && is_file(realpath($path)) && pathinfo(realpath($path))['extension'] == 'png'){
+            $this->setTree(realpath($path));
+        }
+
+        if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+            echo "\e[92mThe build of tree is finished !\e[0m".PHP_EOL;
+        }
+        return $this->_tree;
+    }
+
+    /**
+     * @param $name
+     */
+    private function setSpriteName($name){
+        $this->_sprite_name = (new SplFileInfo($name))->getExtension() != 'png' ? $name.'.png' : $name;
+    }
+
+    /**
+     * Increment error variable on error.
+     */
+    private function setError()
+    {
+        if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+            echo "\e[91mError detected !\e[0m".PHP_EOL;
+        }
+        $this->_error = $this->_error + 1;
+    }
+
+    /**
+     * Add to tree the path of image.
+     * @param $path
+     */
+    private function setTree($path)
+    {
+        if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+            echo "Adding '$path' to tree.".PHP_EOL;
+        }
+        array_push($this->_tree, $path);
+    }
+
+    /**
+     * Generate Sprite.
+     */
+    private function getSprite() {
+        if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+            echo "\e[92mStarting the build of the sprite...\e[0m".PHP_EOL;
+        }
+        $position = 0;
+        $img = $this->initImage($this->_sprite_name);
+        foreach ($this->_tree as $file){
+            $mimeType = explode('/',mime_content_type($file));
+            if (pathinfo($file)['extension'] == 'png'){
+                try { $image = imagecreatefrompng($file);}
+                catch (Exception $exception){
+                    $this->setError();
+                    die("Une erreur est survenue: ".$exception->getMessage());
+                }
+                $this->setPosition($position);
+                if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+                    echo "Adding image to the sprite.".PHP_EOL;
+                }
+                imagecopy($img,$image,0,$position,0,0,imagesx($image), imagesy($image));
+                $position += (imagesy($image)); //TODO: add padding here.
+                imagepng($img,$this->_sprite_name);
+            } elseif (isset($this->_arguments['c']) && $mimeType[0] == 'image'){
+                if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+                    echo "\e[92mTrying conversion.\e[0m".PHP_EOL;
+                }
+                try { imagepng(imagecreatefromstring(file_get_contents($file)), $file);}
+                catch (Exception $e){
+                    $this->setError();
+                }
+            }
+        }
+        $this->askToDeleteFile($this->_sprite_name);
+    }
+
+    private function askToDeleteFile($name){
+        if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+            $ask = readline("\e[93mDid you want to delete '$name' ? [y/n]\e[0m".PHP_EOL);
+            if ($ask == 'y' || $ask == 'yes' || $ask == 'o' || $ask == 'oui'){
+                echo "\e[91mDeleting file '$name'.\e[0m".PHP_EOL;
+                unlink($name);
+            } else {
+                echo "\e[92mThe file '$name' will not be deleted.\e[0m".PHP_EOL;
+            }
+        }
+    }
+
+    /**
+     * Init the image with the good height and width.
+     * @param $name
+     * @return false|resource
+     */
+    private function initImage($name){
+        if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+            echo "Init empty sprite.".PHP_EOL;
+        }
+        $width = 0;
+        $height = 0;
+        foreach($this->_tree as $image){
+            if (pathinfo($image)['extension'] == 'png'){
+                try {
+                    $image = imagecreatefrompng($image);
+                    if (imagesx($image) > $width){
+                        $width = imagesx($image);
+                    }
+                    $height += imagesy($image);
+                } catch(Exception $e){
+                    $this->setError();
+                    die("Erreur à l'initialisation de l'image: ".$e->getMessage());
+                }
+            }
+        }
+        $img = imagecreatetruecolor($width, $height);
+        $background = imagecolorallocatealpha($img, 255, 255, 255, 127);
+        imagefill($img, 0, 0, $background);
+        imagealphablending($img, false);
+        imagesavealpha($img, true);
+        imagepng($img,$name);
+        return $img;
+    }
+
+    /**
+     * Setter or style name
+     * @param $name
+     */
+    private function setStyleName($name){
+        $this->_style_name = (new SplFileInfo($name))->getExtension() != 'css' ? $name.'.css' : $name;
+    }
+
+    /**
+     * Generate the base of the style
+     */
+    private function getStyle() {
+        if (isset($this->_arguments['n']) || isset($this->_arguments['dry-run'])){
+            echo "Generating sprite style.".PHP_EOL;
+        }
+        $i = 0;
+        $fp = fopen($this->_style_name, 'w+');
+        foreach ($this->_tree as $img){
+            if (pathinfo($img)['extension'] == 'png'){
+                $tmp = $img;
+                $tmp = str_replace(__DIR__.'/','',$tmp);
+                $img = imagecreatefrompng($img);
+                $style = ".sprite-$i {".PHP_EOL;
+                $style .= "\tbackground-image: url('$tmp');".PHP_EOL;
+                $style .= "\tbackground-position: 0 -{$this->_position[$i]}px;".PHP_EOL;
+                $style .= "\twidth: ".imagesx($img)."px;".PHP_EOL;
+                $style .= "\theight: ".imagesy($img)."px;".PHP_EOL;
+                $style .= "\tpadding: {$this->_padding}px;".PHP_EOL;
+                $style .= "}".PHP_EOL;
+                fwrite($fp, $style);
+                $i++;
+            }
+        }
+        fclose($fp);
+        $this->askToDeleteFile($this->_style_name);
+    }
+    /**
+     * Show the number of errors.
+     */
+    private function showNumberOfError()
+    {
+        echo "Numbers of error(s): ".$this->_error.PHP_EOL;
+        echo "Done !".PHP_EOL;
+    }
+}
+
+$foo = new CSSGenerator();
+$foo->make();
